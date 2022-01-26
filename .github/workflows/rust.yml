@@ -17,7 +17,7 @@ jobs:
     - name: Build
       run: cargo build --verbose --release
     - name: Rename Build
-      run: rename ./target/release/json-log-formatter.exe ./target/release/jlf.exe
+      run: ren ./target/release/json-log-formatter.exe jlf.exe
     - name: Save Build
       uses: actions/upload-artifact@v2.3.1
       with:
@@ -53,4 +53,4 @@ jobs:
       uses: actions/upload-artifact@v2.3.1
       with:
         name: "Linux_x64"
-        path: "./target/release/json-log-formatter"
+        path: "./target/release/jlf"
