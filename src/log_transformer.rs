@@ -3,8 +3,14 @@ use std::io::Write;
 
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clap::Parser;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
+
+/// Log messages longer than MULTILINE_MESSAGE_THRESHOLD will have their fields put on a separate line
+const MULTILINE_MESSAGE_THRESHOLD: usize = 120;
+
+/// Extra fields longer than MULTILINE_FIELD_THRESHOLD will be put on their own line
+const MULTILINE_FIELD_THRESHOLD: usize = 120;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -53,6 +59,17 @@ pub struct Config {
     #[clap(long)]
     multiline_fields: bool,
 
+    /// Use jql (https://github.com/yamafaktory/jql)
+    /// processes extra fields using jql before display
+    /// if the result of jql returns no fields, do not display the entry
+    #[clap(long)]
+    jql: Option<String>,
+
+    /// Use jql (https://github.com/yamafaktory/jql)
+    /// only displays lines where jql returns non empty
+    #[clap(long)]
+    jql_filter: Option<String>,
+
     timestamp_format: Option<String>,
 }
 
@@ -68,6 +85,8 @@ pub struct LogTransformer {
     spacing: i64,
     hide_non_json: bool,
     multiline_fields: bool,
+    jql: Option<String>,
+    jql_filter: Option<String>,
 }
 
 impl LogTransformer {
@@ -98,127 +117,181 @@ impl LogTransformer {
             spacing: config.spacing,
             filter_levels,
             multiline_fields: config.multiline_fields,
+            jql: config.jql,
+            jql_filter: config.jql_filter
         }
     }
 
     pub fn transform_and_print(&self, line: String) -> anyhow::Result<()> {
-        match serde_json::from_str::<Value>(&line) {
-            Ok(val) => {
-                match val.as_object() {
-                    Some(obj) => {
-                        let message = obj.get(&self.message_field).unwrap().as_str().unwrap_or("???");
-                        let level = obj.get(&self.level_field).unwrap().as_str().unwrap_or("???");
+        let json_value = serde_json::from_str::<Value>(&line);
 
-                        // Skip if this level isn't in the level filter list
-                        if !self.filter_levels.is_empty() && !self.filter_levels.contains(level) {
-                            return Ok(());
-                        }
+        if let Ok(val) = json_value.as_ref() {
+            let json_obj = val.as_object();
 
-                        let time = obj.get(&self.timestamp_field).unwrap().as_f64();
+            match json_obj {
+                Some(obj) => {
+                    let message = obj.get(&self.message_field).unwrap().as_str().unwrap_or("???");
+                    let level = obj.get(&self.level_field).unwrap().as_str().unwrap_or("???");
 
-                        let bufwtr = BufferWriter::stdout(match self.disable_colors {
-                            true => ColorChoice::Never,
-                            false => ColorChoice::Auto,
-                        });
+                    // Skip if this level isn't in the level filter list
+                    if !self.filter_levels.is_empty() && !self.filter_levels.contains(level) {
+                        return Ok(());
+                    }
 
-                        let mut buffer = bufwtr.buffer();
+                    let time = obj.get(&self.timestamp_field).unwrap().as_f64();
 
-                        macro_rules! col {
+                    let bufwtr = BufferWriter::stdout(match self.disable_colors {
+                        true => ColorChoice::Never,
+                        false => ColorChoice::Auto,
+                    });
+
+                    let mut buffer = bufwtr.buffer();
+
+                    macro_rules! col {
                             ($col:expr) => {
                                 buffer.set_color(ColorSpec::new().set_fg(Some($col)))?;
                             };
                         }
 
-                        if let Some(t) = time {
-                            let parsed_dt = NaiveDateTime::from_timestamp(t as i64, 0);
-                            let datetime: DateTime<Utc> = DateTime::from_utc(parsed_dt, Utc);
-                            let local_dt: DateTime<Local> = DateTime::from(datetime);
+                    if let Some(t) = time {
+                        let parsed_dt = NaiveDateTime::from_timestamp(t as i64, 0);
+                        let datetime: DateTime<Utc> = DateTime::from_utc(parsed_dt, Utc);
+                        let local_dt: DateTime<Local> = DateTime::from(datetime);
 
-                            col!(Color::Magenta);
-                            write!(&mut buffer, "[{}]", local_dt.format("%Y-%m-%d %r"))?;
-                        }
+                        col!(Color::Magenta);
+                        write!(&mut buffer, "[{}]", local_dt.format("%Y-%m-%d %r"))?;
+                    }
 
-                        col!(match level {
+                    col!(match level.trim().to_lowercase().as_str() {
                             "trace" | "debug" => Color::Black,
-                            "info" => Color::Blue,
+                            "info" | "notice" => Color::Blue,
                             "warning" => Color::Yellow,
-                            "error" | "critical" | "fatal" => Color::Red,
+                            "error" | "err" | "critical" | "crit" | "fatal" | "emerg" | "emergency" | "alert" => Color::Red,
                             _ => Color::Black
                         });
 
-                        write!(&mut buffer, "[{}] ", level).unwrap();
+                    write!(&mut buffer, "[{}] ", level).unwrap();
 
-                        col!(Color::Black);
-                        write!(&mut buffer, "{}", message).unwrap();
+                    col!(Color::Black);
+                    write!(&mut buffer, "{}", message).unwrap();
 
-                        if !self.hide_extra_fields {
-                            let extra_fields: Vec<(String, String)> = obj.iter()
-                                .filter(|(k, _)| !self.excluded_fields.contains(k.as_str()))
-                                .map(|(k, v)| {
-                                    let formatted_value = match v {
-                                        Value::Null => "NULL".to_string(),
-                                        Value::Bool(b) => match b {
-                                            true => "true".to_string(),
-                                            false => "false".to_string()
+                    if message.len() > MULTILINE_MESSAGE_THRESHOLD && !self.multiline_fields {
+                        write!(&mut buffer, "\n")?;
+                    }
+
+                    if !self.hide_extra_fields {
+                        if let Some(query) = &self.jql_filter {
+                            let walked = jql::walker(val, Some(query));
+
+                            match walked {
+                                Err(_) => {
+                                    return Ok(())
+                                }
+                                Ok(_) => {}
+                            }
+                        }
+
+                        let vv = if let Some(query) = &self.jql {
+                            let walked = jql::walker(val, Some(query));
+
+                            let query_result = match walked {
+                                Ok(qr) => match qr {
+                                    Value::Object(_) => qr,
+                                    _ => Value::Object(Map::from_iter(std::iter::once(("_jlf_inner".to_string(), qr)))),
+                                },
+                                Err(why) => match why.as_str() {
+                                    "Empty group" => {
+                                        // The jql query has resulted in no values, skip this log entry
+                                        return Ok(());
+                                    }
+                                    _ => {
+                                        if why.contains("not found on the parent element") {
+                                            return Ok(());
                                         }
-                                        Value::Number(n) => {
-                                            n.to_string()
-                                        }
-                                        Value::String(s) => s.clone(),
-                                        Value::Array(a) => format!("{:?}", &a),
-                                        Value::Object(o) => format!("{:?}", &o)
-                                    };
 
-                                    (k.clone(), formatted_value.to_string())
-                                }).collect();
+                                        panic!("{}", why);
+                                    }
+                                }
+                            };
 
-                            for (k, v) in extra_fields {
-                                if self.multiline_fields {
-                                    write!(&mut buffer, "\n")?;
-                                    write!(&mut buffer, "  ")?;
-                                    col!(Color::Green);
-                                    write!(&mut buffer, "{}", k)?;
+                            query_result
+                        } else {
+                            val.clone()
+                        };
+
+                        let extra_fields: Vec<(String, String)> = vv.as_object().unwrap().iter()
+                            .filter(|(k, _)| !self.excluded_fields.contains(k.as_str()))
+                            .map(|(k, v)| {
+                                let formatted_value = match v {
+                                    Value::Null => "NULL".to_string(),
+                                    Value::Bool(b) => match b {
+                                        true => "true".to_string(),
+                                        false => "false".to_string()
+                                    }
+                                    Value::Number(n) => {
+                                        n.to_string()
+                                    }
+                                    Value::String(s) => s.clone(),
+                                    Value::Array(a) => format!("{:?}", &a),
+                                    Value::Object(o) => format!("{:?}", &o)
+                                };
+
+                                (k.clone(), formatted_value.to_string())
+                            }).collect();
+
+                        for (k, v) in extra_fields {
+                            if self.multiline_fields {
+                                write!(&mut buffer, "\n")?;
+                                write!(&mut buffer, "  ")?;
+                                col!(Color::Green);
+                                write!(&mut buffer, "{}", k)?;
+
+                                if v.len() > MULTILINE_FIELD_THRESHOLD || v.contains("\n") {
                                     col!(Color::Black);
-                                    write!(&mut buffer, "=")?;
+                                    write!(&mut buffer, ":\n")?;
                                     col!(Color::Black);
                                     write!(&mut buffer, "{}", v)?;
+                                    write!(&mut buffer, "\n")?;
                                 } else {
-                                    col!(Color::Black);
-                                    write!(&mut buffer, " {} ", self.separator)?;
-                                    col!(Color::Green);
-                                    write!(&mut buffer, "{}", k)?;
                                     col!(Color::Black);
                                     write!(&mut buffer, "=")?;
                                     col!(Color::Black);
                                     write!(&mut buffer, "{}", v)?;
                                 }
+                            } else {
+                                col!(Color::Black);
+                                write!(&mut buffer, " {} ", self.separator)?;
+                                col!(Color::Green);
+                                write!(&mut buffer, "{}", k)?;
+                                col!(Color::Black);
+                                write!(&mut buffer, "=")?;
+                                col!(Color::Black);
+                                write!(&mut buffer, "{}", v)?;
                             }
                         }
+                    }
 
 
-                        col!(Color::Black);
+                    col!(Color::Black);
+                    write!(&mut buffer, "\n")?;
+
+                    for _ in 0..self.spacing {
                         write!(&mut buffer, "\n")?;
-
-                        for _ in 0..self.spacing {
-                            write!(&mut buffer, "\n")?;
-                        }
-
-                        bufwtr.print(&buffer)?;
                     }
-                    None => {
-                        if !self.hide_non_json {
-                            println!("{}", line);
-                        }
+
+                    bufwtr.print(&buffer)?;
+                }
+                None => {
+                    if !self.hide_non_json {
+                        println!("{}", line);
                     }
                 }
             }
-
-            Err(_) => {
-                if !self.hide_non_json {
-                    println!("{}", line);
-                }
+        } else {
+            if !self.hide_non_json {
+                println!("{}", line);
             }
-        };
+        }
 
         Ok(())
     }
