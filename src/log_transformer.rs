@@ -9,36 +9,54 @@ use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub struct Config {
-    #[clap(short, long)]
-    message_field_name: Option<String>,
+    /// The name of the json field containing the message
+    #[clap(short, long, default_value = "msg")]
+    message_field_name: String,
 
-    #[clap(short, long)]
-    level_field_name: Option<String>,
+    /// The name of the json field containing the level
+    #[clap(short, long, default_value = "level")]
+    level_field_name: String,
 
+    /// A list of json fields to exclude from logging. Default none
     #[clap(short, long)]
     exclude_fields: Option<Vec<String>>,
 
-    #[clap(short, long)]
-    separator: Option<String>,
+    /// The separator printed between extra json fields
+    #[clap(long, default_value = "|")]
+    separator: String,
 
-    #[clap(short, long)]
-    timestamp_field: Option<String>,
+    /// The name of the json field containing the timestamp
+    #[clap(short, long, default_value = "ts")]
+    timestamp_field_name: String,
 
+    /// Does not print extra json fields
     #[clap(short, long)]
-    hide_extra_fields: Option<bool>,
+    hide_extra_fields: bool,
 
+    /// Only show logs with these levels. Default empty (prints all levels)
     #[clap(short, long)]
     filter_levels: Option<Vec<String>>,
 
+    /// The number of empty lines printed after formatted logs
+    #[clap(short, long, default_value = "0")]
+    spacing: i64,
+
+    /// Do not attempt to print logs in color
     #[clap(short, long)]
-    disable_colors: Option<bool>,
+    disable_colors: bool,
+
+    /// Hides any log lines that are not valid json
+    #[clap(long)]
+    hide_non_json: bool,
+
+    /// Prints each extra field on it's own line
+    #[clap(long)]
+    multiline_fields: bool,
 
     timestamp_format: Option<String>,
 }
 
 pub struct LogTransformer {
-    config: Config,
-
     message_field: String,
     level_field: String,
     timestamp_field: String,
@@ -47,54 +65,39 @@ pub struct LogTransformer {
     hide_extra_fields: bool,
     filter_levels: HashSet<String>,
     disable_colors: bool,
+    spacing: i64,
+    hide_non_json: bool,
+    multiline_fields: bool,
 }
 
 impl LogTransformer {
     pub fn new(config: Config) -> LogTransformer {
-        let msg_field_name = match (&config.message_field_name).as_ref() {
-            Some(field_name) => field_name.clone(),
-            None => "msg".to_string()
-        };
-
-        let level_field_name = match (&config.level_field_name).as_ref() {
-            Some(field_name) => field_name.clone(),
-            None => "level".to_string()
-        };
-
-        let timestamp_field_name = match (&config.timestamp_field).as_ref() {
-            Some(field_name) => field_name.clone(),
-            None => "ts".to_string()
-        };
-
-        let mut excluded_fields: HashSet<String> = match (&config.exclude_fields).as_ref() {
+        let mut excluded_fields = match (&config.exclude_fields).as_ref() {
             Some(excluded) => excluded.into_iter().cloned().collect(),
             None => HashSet::new(),
         };
 
-        let filter_levels: HashSet<String> = match (&config.filter_levels).as_ref() {
+        let filter_levels = match (&config.filter_levels).as_ref() {
             Some(filtered) => filtered.into_iter().cloned().collect(),
             None => HashSet::new(),
         };
 
-        let separator = match (&config.separator).as_ref() {
-            Some(sep) => sep.clone(),
-            None => "|".to_string()
-        };
-
-        excluded_fields.insert(msg_field_name.to_string());
-        excluded_fields.insert(level_field_name.to_string());
-        excluded_fields.insert(timestamp_field_name.to_string());
+        excluded_fields.insert(config.message_field_name.clone());
+        excluded_fields.insert(config.level_field_name.clone());
+        excluded_fields.insert(config.timestamp_field_name.clone());
 
         LogTransformer {
-            message_field: msg_field_name,
-            level_field: level_field_name,
-            timestamp_field: timestamp_field_name,
+            message_field: config.message_field_name.clone(),
+            level_field: config.level_field_name.clone(),
+            timestamp_field: config.timestamp_field_name.clone(),
             excluded_fields,
-            separator,
-            hide_extra_fields: *(&config).hide_extra_fields.as_ref().unwrap_or(&false),
+            separator: config.separator.clone(),
+            hide_extra_fields: config.hide_extra_fields,
+            disable_colors: config.disable_colors,
+            hide_non_json: config.hide_non_json,
+            spacing: config.spacing,
             filter_levels,
-            disable_colors: *(&config).disable_colors.as_ref().unwrap_or(&false),
-            config,
+            multiline_fields: config.multiline_fields,
         }
     }
 
@@ -103,10 +106,15 @@ impl LogTransformer {
             Ok(val) => {
                 match val.as_object() {
                     Some(obj) => {
-                        let message = obj.get(self.message_field.as_str()).unwrap().as_str().unwrap_or("???");
-                        let level = obj.get(self.level_field.as_str()).unwrap().as_str().unwrap_or("???");
+                        let message = obj.get(&self.message_field).unwrap().as_str().unwrap_or("???");
+                        let level = obj.get(&self.level_field).unwrap().as_str().unwrap_or("???");
 
-                        let time = obj.get(self.timestamp_field.as_str()).unwrap().as_f64();
+                        // Skip if this level isn't in the level filter list
+                        if !self.filter_levels.is_empty() && !self.filter_levels.contains(level) {
+                            return Ok(());
+                        }
+
+                        let time = obj.get(&self.timestamp_field).unwrap().as_f64();
 
                         let bufwtr = BufferWriter::stdout(match self.disable_colors {
                             true => ColorChoice::Never,
@@ -145,7 +153,7 @@ impl LogTransformer {
 
                         if !self.hide_extra_fields {
                             let extra_fields: Vec<(String, String)> = obj.iter()
-                                .filter(|(k, _)| !self.excluded_fields.contains(k.clone()))
+                                .filter(|(k, _)| !self.excluded_fields.contains(k.as_str()))
                                 .map(|(k, v)| {
                                     let formatted_value = match v {
                                         Value::Null => "NULL".to_string(),
@@ -161,34 +169,54 @@ impl LogTransformer {
                                         Value::Object(o) => format!("{:?}", &o)
                                     };
 
-                                    (k.clone(), formatted_value.clone())
+                                    (k.clone(), formatted_value.to_string())
                                 }).collect();
 
                             for (k, v) in extra_fields {
-                                col!(Color::Black);
-                                write!(&mut buffer, " {} ", self.separator)?;
-                                col!(Color::Green);
-                                write!(&mut buffer, "{}", k)?;
-                                col!(Color::Black);
-                                write!(&mut buffer, "=")?;
-                                col!(Color::Black);
-                                write!(&mut buffer, "{}", v)?;
+                                if self.multiline_fields {
+                                    write!(&mut buffer, "\n")?;
+                                    write!(&mut buffer, "  ")?;
+                                    col!(Color::Green);
+                                    write!(&mut buffer, "{}", k)?;
+                                    col!(Color::Black);
+                                    write!(&mut buffer, "=")?;
+                                    col!(Color::Black);
+                                    write!(&mut buffer, "{}", v)?;
+                                } else {
+                                    col!(Color::Black);
+                                    write!(&mut buffer, " {} ", self.separator)?;
+                                    col!(Color::Green);
+                                    write!(&mut buffer, "{}", k)?;
+                                    col!(Color::Black);
+                                    write!(&mut buffer, "=")?;
+                                    col!(Color::Black);
+                                    write!(&mut buffer, "{}", v)?;
+                                }
                             }
                         }
+
 
                         col!(Color::Black);
                         write!(&mut buffer, "\n")?;
 
+                        for _ in 0..self.spacing {
+                            write!(&mut buffer, "\n")?;
+                        }
+
                         bufwtr.print(&buffer)?;
                     }
                     None => {
-                        println!("{}", line);
+                        if !self.hide_non_json {
+                            println!("{}", line);
+                        }
                     }
                 }
             }
 
             Err(_) => {
-                println!("{}", line);
+                if !self.hide_non_json {
+                    println!("{}", line);
+                }
             }
         };
 
