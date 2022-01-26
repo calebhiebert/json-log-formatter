@@ -142,7 +142,7 @@ impl LogTransformer {
                             "trace" | "debug" => Color::Black,
                             "info" => Color::Blue,
                             "warning" => Color::Yellow,
-                            "error" | "critical" => Color::Red,
+                            "error" | "critical" | "fatal" => Color::Red,
                             _ => Color::Black
                         });
 
