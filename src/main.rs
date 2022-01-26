@@ -1,15 +1,13 @@
 use std::collections::HashSet;
-use std::fmt::format;
 use std::io;
 use std::io::BufRead;
 use std::io::Write;
 use std::process::exit;
-use std::ptr::write;
 use atty::Stream;
 
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use clap::Parser;
-use serde_json::{Map, Value};
+use serde_json::{Value};
 use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 
 #[derive(Parser, Debug)]
@@ -85,7 +83,7 @@ fn main() {
                         let time = obj.get(timestamp_field_name).unwrap().as_f64();
 
                         let extra_fields: Vec<(String, String)> = obj.iter()
-                            .filter(|(k, v)| !excluded_fields.contains(k.clone()))
+                            .filter(|(k, _)| !excluded_fields.contains(k.clone()))
                             .map(|(k, v)| {
                                 let formatted_value = match v {
                                     Value::Null => "NULL".to_string(),
@@ -104,12 +102,12 @@ fn main() {
                                 (k.clone(), formatted_value.clone())
                             }).collect();
 
-                        let mut bufwtr = BufferWriter::stderr(ColorChoice::Always);
+                        let bufwtr = BufferWriter::stderr(ColorChoice::Always);
                         let mut buffer = bufwtr.buffer();
 
                         macro_rules! col {
                             ($col:expr) => {
-                                buffer.set_color(ColorSpec::new().set_fg(Some($col)));
+                                buffer.set_color(ColorSpec::new().set_fg(Some($col))).unwrap();
                             };
                         }
 
@@ -119,7 +117,7 @@ fn main() {
                             let local_dt: DateTime<Local> = DateTime::from(datetime);
 
                             col!(Color::Magenta);
-                            write!(&mut buffer, "[{}]", local_dt.format("%Y-%m-%d %r"));
+                            write!(&mut buffer, "[{}]", local_dt.format("%Y-%m-%d %r")).unwrap();
                         }
 
                         col!(match level {
@@ -130,26 +128,26 @@ fn main() {
                             _ => Color::Black
                         });
 
-                        write!(&mut buffer, "[{}] ", level);
+                        write!(&mut buffer, "[{}] ", level).unwrap();
 
                         col!(Color::Black);
-                        write!(&mut buffer, "{}", message);
+                        write!(&mut buffer, "{}", message).unwrap();
 
                         extra_fields.iter().for_each(|(k, v)| {
                             col!(Color::Black);
-                            write!(&mut buffer, " {} ", separator);
+                            write!(&mut buffer, " {} ", separator).unwrap();
                             col!(Color::Green);
-                            write!(&mut buffer, "{}", k);
+                            write!(&mut buffer, "{}", k).unwrap();
                             col!(Color::Black);
-                            write!(&mut buffer, "=");
+                            write!(&mut buffer, "=").unwrap();
                             col!(Color::Black);
-                            write!(&mut buffer, "{}", v);
+                            write!(&mut buffer, "{}", v).unwrap();
                         });
 
                         col!(Color::Black);
-                        write!(&mut buffer, "\n");
+                        write!(&mut buffer, "\n").unwrap();
 
-                        bufwtr.print(&buffer);
+                        bufwtr.print(&buffer).unwrap();
                     }
                     None => {
                         println!("{}", line);
