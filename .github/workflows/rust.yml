@@ -16,11 +16,13 @@ jobs:
     - uses: actions/checkout@v2
     - name: Build
       run: cargo build --verbose --release
+    - name: Rename Build
+      run: rename ./target/release/json-log-formatter.exe ./target/release/jlf.exe
     - name: Save Build
       uses: actions/upload-artifact@v2.3.1
       with:
         name: "Windows_x64"
-        path: "./target/release/json-log-formatter.exe"
+        path: "./target/release/jlf.exe"
       
   build-mac:
     runs-on: macos-latest
@@ -28,17 +30,25 @@ jobs:
     - uses: actions/checkout@v2
     - name: Build
       run: cargo build --verbose --release
+    - name: Rename Build
+      run: |
+        mv ./target/release/json-log-formatter ./target/release/jlf
+        chmod +x ./target/release/jlf
     - name: Save Build
       uses: actions/upload-artifact@v2.3.1
       with:
         name: "MacOS_x64"
-        path: "./target/release/json-log-formatter"
+        path: "./target/release/jlf"
   build-linux:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
     - name: Build
       run: cargo build --verbose --release
+    - name: Rename Build
+      run: |
+        mv ./target/release/json-log-formatter ./target/release/jlf
+        chmod +x ./target/release/jlf
     - name: Save Build
       uses: actions/upload-artifact@v2.3.1
       with:
